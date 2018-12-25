@@ -1,66 +1,18 @@
-#include "ApplicationGlobal.h"
 #include "MainWindow.h"
-#include "SleepTimerDialog.h"
 #include "ui_MainWindow.h"
+#include "ApplicationGlobal.h"
+#include "SleepTimerDialog.h"
 #include <QDebug>
-#include <QThread>
 #include <QTime>
+#include <QTimer>
 #include <memory>
 
-class MyAudioOutput : public QThread {
-public:
-	volatile int volume = 100;
-protected:
-	void run()
-	{
-		QAudioFormat format;
-		format.setByteOrder(QAudioFormat::LittleEndian);
-		format.setChannelCount(2);
-		format.setCodec("audio/pcm");
-		format.setSampleRate(16000);
-		format.setSampleSize(16);
-		format.setSampleType(QAudioFormat::SignedInt);
-		QAudioOutput player(format);
-		QIODevice *device = player.start();
-
-		while (1) {
-			if (isInterruptionRequested()) break;
-
-			if (volume > 0) {
-				int amplitude;
-
-				auto Rand = [&](){
-					long long r = (long long)rand() + rand() + rand() + rand();
-					r = r * amplitude * 2 / 4 / RAND_MAX - amplitude;
-					return (int16_t)r;
-				};
-
-				const int N = 800;
-
-				while (1) {
-					int16_t buf[N];
-
-					int n = player.bytesFree();
-					n /= N * 2;
-					if (n < 1) break;
-					for (int i = 0; i < n; i++) {
-						amplitude = volume * 327;
-						for (int j = 0; j < N; j++) {
-							buf[j] = Rand();
-						}
-						device->write((char const *)buf, N * 2);
-					}
-				}
-			}
-
-			msleep(1);
-		}
-
-	}
-};
-
 struct MainWindow::Private {
-	MyAudioOutput audio_out;
+	QTimer interval_10ms_timer;
+	QTimer interval_100ms_timer;
+	std::shared_ptr<QAudioOutput> player;
+	QIODevice *output = nullptr;
+	int volume = 0;
 	QDateTime sleep_time;
 	bool playing = false;
 	bool fadeout = false;
@@ -79,13 +31,29 @@ MainWindow::MainWindow(QWidget *parent)
 
 	ui->label_status->setText(QString());
 
-	startTimer(100);
+	connect(&m->interval_10ms_timer, &QTimer::timeout, [&](){
+		on10msInterval();
+	});
+	m->interval_10ms_timer.start(10);
+
+	connect(&m->interval_100ms_timer, &QTimer::timeout, [&](){
+		on100msInterval();
+	});
+	m->interval_100ms_timer.start(100);
+
+	QAudioFormat format;
+	format.setByteOrder(QAudioFormat::LittleEndian);
+	format.setChannelCount(2);
+	format.setCodec("audio/pcm");
+	format.setSampleRate(16000);
+	format.setSampleSize(16);
+	format.setSampleType(QAudioFormat::SignedInt);
+	m->player = std::make_shared<QAudioOutput>(format);
+	m->output = m->player->start();
 }
 
 MainWindow::~MainWindow()
 {
-	m->audio_out.requestInterruption();
-	m->audio_out.wait();
 	delete m;
 	delete ui;
 }
@@ -97,11 +65,13 @@ bool MainWindow::isPlaying() const
 
 void MainWindow::setSleepTimer()
 {
-	if (global->sleep_timeout_minutes > 0) {
-		m->sleep_time = QDateTime::currentDateTime().addSecs(global->sleep_timeout_minutes * 60);
-	} else {
-		m->sleep_time = QDateTime();
-	}
+	m->sleep_time = QDateTime::currentDateTime().addSecs(global->sleep_timeout_minutes * 60);
+	ui->label_status->setText(QString());
+}
+
+void MainWindow::stopSleepTimer()
+{
+	m->sleep_time = QDateTime();
 	ui->label_status->setText(QString());
 }
 
@@ -109,23 +79,49 @@ void MainWindow::on_pushButton_start_clicked()
 {
 	m->playing = true;
 	m->fadeout = false;
-
+	m->volume = 100;
 	setSleepTimer();
-
-	m->audio_out.volume = 100;
-	if (!m->audio_out.isRunning()) {
-		m->audio_out.start();
-	}
 }
 
 void MainWindow::on_pushButton_stop_clicked()
 {
 	m->playing = false;
 	m->fadeout = false;
-	m->audio_out.volume = 0;
+	m->volume = 0;
+	stopSleepTimer();
 }
 
-void MainWindow::timerEvent(QTimerEvent *event)
+void MainWindow::on10msInterval()
+{
+	if (m->volume > 0) {
+		int amplitude;
+
+		auto Rand = [&](){
+			long long r = (long long)rand() + rand() + rand() + rand();
+			r = r * amplitude * 2 / 4 / RAND_MAX - amplitude;
+			return (int16_t)r;
+		};
+
+		const int N = 800;
+
+		while (1) {
+			int16_t buf[N];
+
+			int n = m->player->bytesFree();
+			n /= N * 2;
+			if (n < 1) break;
+			for (int i = 0; i < n; i++) {
+				amplitude = m->volume * 327;
+				for (int j = 0; j < N; j++) {
+					buf[j] = Rand();
+				}
+				m->output->write((char const *)buf, N * 2);
+			}
+		}
+	}
+}
+
+void MainWindow::on100msInterval()
 {
 	QDateTime now = QDateTime::currentDateTime();
 
@@ -156,8 +152,8 @@ void MainWindow::timerEvent(QTimerEvent *event)
 	}
 
 	if (m->fadeout) {
-		if (m->audio_out.volume > 0) {
-			m->audio_out.volume--;
+		if (m->volume > 0) {
+			m->volume--;
 		} else {
 			m->fadeout = false;
 		}
